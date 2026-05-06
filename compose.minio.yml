@@ -1,0 +1,36 @@
+  services:
+    minio:                                                                                                                                                              
+      image: minio/minio:latest                          
+      restart: unless-stopped
+      command: server /data --console-address ":9001"                                                                                                                   
+      environment:
+        MINIO_ROOT_USER: ${MINIO_ROOT_USER:?err}                                                                                                                        
+        MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?err}                                                                                                                
+      volumes:
+        - minio:/data                                                                                                                                                   
+      healthcheck:                                       
+        test: ["CMD", "mc", "ready", "local"]                                                                                                                           
+        interval: 10s                                    
+        timeout: 5s                                                                                                                                                     
+        retries: 5
+      expose:                                                                                                                                                           
+        - "9000"                                         
+        - "9001"
+      networks:
+        - default
+        - shared                                                                                                                                                        
+   
+    documenso:                                                                                                                                                          
+      depends_on:                                        
+        database:
+          condition: service_healthy
+        minio:
+          condition: service_started
+                                                                                                                                                                        
+  volumes:
+    minio:                                                                                                                                                              
+                                                         
+  networks:
+    shared:
+      name: cautelar-firma-bridge
+      external: true

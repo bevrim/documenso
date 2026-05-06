@@ -1,0 +1,117 @@
+# Compose local para correr Documenso self-hosted contra Cautelar (Lando).
+#
+# Reemplaza al stack DocuSeal — Documenso es AGPLv3 y SU API permite subir
+# documentos via /api/v1 (no es feature Pro como en DocuSeal). Spec:
+# `cautelar/docs/integrations/documenso.md`.
+#
+# Uso:
+#   cd ../documenso
+#   docker compose -f docker-compose.local.yml up -d
+#   docker compose -f docker-compose.local.yml logs -f documenso
+#
+# Healthcheck:
+#   curl -fsS http://localhost:3000/api/v1/documents -H "authorization: Bearer X"
+#   (rechaza con 401 — confirma que el endpoint vive)
+
+name: documenso
+
+services:
+  database:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: documenso
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: documenso
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U documenso']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - documenso_db:/var/lib/postgresql/data
+
+  inbucket:
+    # SMTP de prueba: captura los mails que Documenso envía (links de firma).
+    # UI web → http://localhost:9000
+    image: inbucket/inbucket
+    ports:
+      - '9000:9000'   # web UI
+      - '2500:2500'   # SMTP
+      - '1100:1100'   # POP3
+
+  minio:
+    # Storage S3-compatible para PDFs. Necesario porque la API de Documenso
+    # expone descargas de PDFs firmados sólo cuando UPLOAD_TRANSPORT=s3.
+    image: minio/minio
+    ports:
+      - '9001:9001'  # console
+      - '9002:9002'  # API
+    environment:
+      MINIO_ROOT_USER: documenso
+      MINIO_ROOT_PASSWORD: password
+    entrypoint: sh
+    command: -c 'mkdir -p /data/documenso && minio server /data --console-address ":9001" --address ":9002"'
+    volumes:
+      - documenso_minio:/data
+
+  documenso:
+    image: documenso/documenso:latest
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - '3000:3000'
+    networks:
+      - default
+      - lando_proxy
+    extra_hosts:
+      # Permite que Documenso entregue webhooks a Cautelar (cautelar.lndo.site
+      # apunta al nginx de Cautelar dentro de la red landoproxy edge).
+      - 'cautelar.lndo.site:172.19.0.4'
+    environment:
+      PORT: '3000'
+      NEXTAUTH_SECRET: 'local-dev-nextauth-secret-cambia-en-prod-12345'
+      NEXT_PRIVATE_ENCRYPTION_KEY: 'local-dev-encryption-key-cambia-en-prod-32chars'
+      NEXT_PRIVATE_ENCRYPTION_SECONDARY_KEY: 'local-dev-secondary-key-cambia-en-prod-32chars'
+      NEXT_PUBLIC_WEBAPP_URL: 'http://localhost:3000'
+      NEXT_PRIVATE_INTERNAL_WEBAPP_URL: 'http://localhost:3000'
+      NEXT_PRIVATE_DATABASE_URL: 'postgres://documenso:password@database:5432/documenso'
+      NEXT_PRIVATE_DIRECT_DATABASE_URL: 'postgres://documenso:password@database:5432/documenso'
+      NEXT_PUBLIC_UPLOAD_TRANSPORT: 's3'
+      # IMPORTANTE: este endpoint queda en la firma del presigned URL. Debe ser
+      # un host resoluble desde Documenso (genera presigned + sube PDFs firmados)
+      # Y desde Cautelar (hace el PUT del PDF original tras create document).
+      # MinIO está publicado al host en :9002 → ambos llegan vía 172.17.0.1.
+      NEXT_PRIVATE_UPLOAD_ENDPOINT: 'http://172.17.0.1:9002'
+      NEXT_PRIVATE_UPLOAD_FORCE_PATH_STYLE: 'true'
+      NEXT_PRIVATE_UPLOAD_REGION: 'us-east-1'
+      NEXT_PRIVATE_UPLOAD_BUCKET: 'documenso'
+      NEXT_PRIVATE_UPLOAD_ACCESS_KEY_ID: 'documenso'
+      NEXT_PRIVATE_UPLOAD_SECRET_ACCESS_KEY: 'password'
+      # Permite que el webhook salga a hostnames que resuelven a IPs privadas
+      # (cautelar.lndo.site → 172.19.0.4). Sin esto, Documenso rechaza la URL
+      # con assertNotPrivateUrl.
+      NEXT_PRIVATE_WEBHOOK_SSRF_BYPASS_HOSTS: 'cautelar.lndo.site'
+      NEXT_PRIVATE_SMTP_TRANSPORT: 'smtp-auth'
+      NEXT_PRIVATE_SMTP_HOST: 'inbucket'
+      NEXT_PRIVATE_SMTP_PORT: '2500'
+      NEXT_PRIVATE_SMTP_UNSAFE_IGNORE_TLS: 'true'
+      NEXT_PRIVATE_SMTP_FROM_NAME: 'Documenso Local'
+      NEXT_PRIVATE_SMTP_FROM_ADDRESS: 'noreply@documenso.local'
+      NEXT_PRIVATE_SIGNING_TRANSPORT: 'local'
+      NEXT_PRIVATE_SIGNING_LOCAL_FILE_PATH: '/opt/documenso/cert.p12'
+      NEXT_PRIVATE_SIGNING_PASSPHRASE: 'localpass'
+      NEXT_PRIVATE_JOBS_PROVIDER: 'local'
+      DOCUMENSO_DISABLE_TELEMETRY: 'true'
+    volumes:
+      - ./dev-cert/certificate.p12:/opt/documenso/cert.p12:ro
+
+volumes:
+  documenso_db:
+  documenso_minio:
+
+networks:
+  default:
+  lando_proxy:
+    external: true
+    name: landoproxyhyperion5000gandalfedition_edge
